@@ -1,1 +1,6 @@
-
+openl3~=0.4.1
+pydub~=0.25.1
+ftfy~=6.1.1
+torch~=1.11.0
+transformers~=4.18.0
+docarray==0.12.1
