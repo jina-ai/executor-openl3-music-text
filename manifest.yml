@@ -1,2 +1,5 @@
 manifest_version: 1
-name: OpenL3MusicText
+name: OpenL3MusicAndTextEncoder
+keywords: [audio, music, text, openl3, clip]
+url: https://github.com/jina-ai/executor-openl3-music-text
+description: Encoder that embeds music and text data

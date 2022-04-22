@@ -198,8 +198,8 @@ class OpenL3MusicText(Executor):
 
     @requests
     def encode(self, docs: DocumentArray, parameters: Dict, **kwargs):
-        audio_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.uri), docs)))
-        text_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.text), docs)))
+        audio_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.uri) and doc_.embedding is None, docs)))
+        text_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.text) and doc_.embedding is None, docs)))
 
         OpenL3MusicText._assert_doc_has_either_text_or_audio_uri(audio_docs, text_docs)
 

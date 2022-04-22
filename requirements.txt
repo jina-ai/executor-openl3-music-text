@@ -1,4 +1,6 @@
-openl3~=0.4.1
+# openl3~=0.4.1
+h5py
+openl3 @ git+https://github.com/slettner/openl3@fix-h5py
 pydub~=0.25.1
 ftfy~=6.1.1
 torch~=1.11.0
