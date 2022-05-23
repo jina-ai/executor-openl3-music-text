@@ -1,10 +1,7 @@
 import array
-import os
-import tempfile
-import urllib
+import io
 import warnings
-from typing import Dict, Optional, Tuple, Union, Sequence
-from urllib.parse import urlparse
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import torch
@@ -20,8 +17,8 @@ from transformers import CLIPModel, CLIPTokenizer
 warnings.filterwarnings("ignore")
 
 
-def _load_mp3(path_to_mp3: str) -> Tuple[np.ndarray, int]:
-    sound = AudioSegment.from_mp3(file=path_to_mp3)
+def _load_audio(doc: Document) -> Document:
+    sound = AudioSegment.from_file(io.BytesIO(doc.blob))
     left, right = sound.split_to_mono()
 
     bit_depth = left.sample_width * 8
@@ -32,8 +29,9 @@ def _load_mp3(path_to_mp3: str) -> Tuple[np.ndarray, int]:
 
     mean = np.mean([left, right], axis=0)
     normalized = mean / np.max(np.abs(mean))
-
-    return normalized, sound.frame_rate
+    doc.tensor = normalized
+    doc.tags['sr'] = sound.frame_rate
+    return doc
 
 
 def _remove_first_and_last(embeddings, ts_list):
@@ -44,96 +42,7 @@ def _remove_first_and_last(embeddings, ts_list):
     return [e[1:-1] for e in embeddings], [t[1:-1] for t in ts_list]
 
 
-def _download_mp3(doc: Document) -> str:
-    def download_file(
-        url: str,
-        output_file: Union[str, os.PathLike],
-        headers: Optional[Dict[str, str]] = None,
-    ):
-        """
-        Download a file via HTTP[S] to a specified directory
-
-        :param url: URL of the file to be downloaded
-        :param output_file: Destination path for the downloaded file
-        :param headers: Optional headers to add to request, e.g. {"Authorization": "Bearer <access_token>" }
-        """
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        if headers:
-            headers_list = [(k, v) for k, v in headers.items()]
-            opener = urllib.request.build_opener()
-            opener.addheaders = headers_list
-            urllib.request.install_opener(opener)
-
-        urllib.request.urlretrieve(url, output_file)
-
-    uri = doc.uri
-    temp_save_path = os.path.join(tempfile.tempdir, _track_hash_from_uri(uri) + ".mp3")
-    if os.path.isfile(temp_save_path):
-        return temp_save_path
-    else:
-        download_file(uri, output_file=temp_save_path)
-        return temp_save_path
-
-
-def _track_hash_from_uri(uri: str) -> str:
-    """
-    Example URI pattern:
-    https://p.scdn.co/mp3-preview/4d26180e6961fd46866cd9106936ea55dfcbaa75?cid=774b29d4f13844c495f206cafdad9c86
-    """
-    return uri.split("/")[-1].split("?")[0]
-
-
-class MP3AudioLoader:
-    """
-    Loads MP3 file into numpy array and stores it under the `.tensor` attribute.
-    If the uri is a valid url the loader first downloads the file, loads the audio and deletes the file again.
-    """
-
-    __MP3_SR = 44100
-
-    def __init__(self, trim_to_seconds: Optional[int] = None):
-        self._trim_to_seconds = trim_to_seconds
-        self.log = JinaLogger("MP3AudioLoader")
-
-    def load(self, docs: DocumentArray):
-        docs = DocumentArray(list(filter(lambda doc_: bool(doc_.uri), docs)))
-        for doc in docs:
-            if MP3AudioLoader.is_valid_url(doc.uri):
-                path_to_mp3 = _download_mp3(doc)
-            else:
-                path_to_mp3 = doc.uri
-
-            audio, sr = _load_mp3(path_to_mp3)
-            assert MP3AudioLoader.__MP3_SR == sr, "Conflicting frame rates detected."
-            if self._trim_to_seconds is not None:
-                audio = self.trim_to_seconds(audio)
-
-            doc.tensor = audio
-            doc.tags["sr"] = int(sr)
-            os.remove(path_to_mp3)
-
-    def trim_to_seconds(self, audio: np.ndarray) -> np.ndarray:
-        trim_length = self._trim_to_seconds * MP3AudioLoader.__MP3_SR
-        audio = audio[:trim_length]
-        if audio.size < trim_length:
-            audio = np.concatenate(
-                [
-                    audio,
-                    np.zeros(trim_length - audio.size),
-                ]
-            )
-        return audio
-
-    @staticmethod
-    def is_valid_url(url: str) -> bool:
-        try:
-            result = urlparse(url)
-            return all([result.scheme, result.netloc])
-        except:
-            return False
-
-
-class OpenL3MusicText(Executor):
+class BiModalMusicTextEncoder(Executor):
     """Works only on mp3 codec."""
 
     def __init__(
@@ -142,7 +51,6 @@ class OpenL3MusicText(Executor):
         effective_sample_rate: int = 44100,
         hop_size_in_sec: int = 1,
         batch_size: int = 32,
-        trim_to_seconds: Optional[int] = None,
         pretrained_model_name_or_path: str = "openai/clip-vit-base-patch32",
         base_tokenizer_model: Optional[str] = None,
         max_length: int = 77,
@@ -157,8 +65,6 @@ class OpenL3MusicText(Executor):
             how stride of this sliding window.
         :param batch_size: Default batch size for encoding, used if the
             batch size is not passed as a parameter with the request.
-        :param trim_to_seconds: If set, the audio will be either cut or padded with zeros
-            to the desired length in seconds
         :param pretrained_model_name_or_path: Can be either:
             - A string, the model id of a pretrained CLIP model hosted
                 inside a model repo on huggingface.co, e.g., 'openai/clip-vit-base-patch32'
@@ -173,8 +79,6 @@ class OpenL3MusicText(Executor):
         self.batch_size = batch_size
         self.hop_size_in_seconds = hop_size_in_sec
         self.sr = effective_sample_rate
-
-        self._mp3_loader = MP3AudioLoader(trim_to_seconds=trim_to_seconds)
 
         self.audio_model = load_audio_embedding_model(
             input_repr="mel256",
@@ -198,38 +102,32 @@ class OpenL3MusicText(Executor):
 
     @requests
     def encode(self, docs: DocumentArray, parameters: Dict, **kwargs):
-        audio_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.uri) and doc_.embedding is None, docs)))
+        audio_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.blob) and doc_.embedding is None, docs)))
         text_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.text) and doc_.embedding is None, docs)))
-
-        OpenL3MusicText._assert_doc_has_either_text_or_audio_uri(audio_docs, text_docs)
 
         self.log.info(
             f"Received batch of size={len(docs)} "
-            f"containing {len(audio_docs)} docs with an audio uri "
+            f"containing {len(audio_docs)} docs with an audio blobs "
             f"and {len(text_docs)} with a text attribute"
         )
 
+        audio_results = DocumentArray()
         for docs_batch in DocumentArray(
             audio_docs[parameters.get("traversal_paths", self.traversal_paths)],
         ).batch(batch_size=parameters.get("batch_size", self.batch_size)):
-            self._load_audio(audio_docs)
-
+            docs_batch.apply(_load_audio)
             embeddings_list, ts_list = self._compute_audio_embeddings(docs_batch)
             embeddings_list, ts_list = _remove_first_and_last(embeddings_list, ts_list)
 
             for doc, embeddings_this_doc, ts_this_doc in zip(
                 docs_batch, embeddings_list, ts_list
             ):
-                chunks = DocumentArray()
                 for emb, ts in zip(embeddings_this_doc, ts_this_doc):
                     document = Document()
                     document.tags = doc.tags.copy()
-                    document.uri = doc.uri
                     document.tags["location"] = int(ts)
                     document.embedding = emb
-                    chunks.append(document)
-                doc.pop("tensor")
-                doc.chunks = chunks
+                    audio_results.append(document)
 
         for docs_batch in DocumentArray(
             text_docs[parameters.get("traversal_paths", self.traversal_paths)],
@@ -242,8 +140,10 @@ class OpenL3MusicText(Executor):
                 for doc, embedding in zip(docs_batch, embeddings):
                     doc.embedding = embedding
 
+        return audio_results + text_docs
+
     def _load_audio(self, docs: DocumentArray):
-        self._mp3_loader.load(docs)
+        docs.apply(_load_audio)
 
     def _generate_input_tokens(self, texts: Sequence[str]):
         input_tokens = self.tokenizer(
@@ -285,12 +185,3 @@ class OpenL3MusicText(Executor):
 
         return embedding_list, ts_list
 
-    @staticmethod
-    def _assert_doc_has_either_text_or_audio_uri(audio_docs: DocumentArray, text_docs: DocumentArray):
-        all_ids_audio = [d.id for d in audio_docs]
-        all_ids_text = [d.id for d in text_docs]
-
-        intersecting_docs = set(all_ids_text).intersection(all_ids_audio)
-        if intersecting_docs != set():
-            raise ValueError(f'Documents with ids={intersecting_docs} have both the text and uri attribute set.'
-                             f'Embeddings would overwrite each other.')

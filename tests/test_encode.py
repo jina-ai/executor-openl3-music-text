@@ -1,25 +1,26 @@
+import glob
+import os
+from typing import List
+
 import pytest as pytest
 from docarray import DocumentArray, Document
 
-from executor import OpenL3MusicText
+from executor import BiModalMusicTextEncoder
 
 
 @pytest.fixture()
-def audio_docs() -> DocumentArray:
+def mp3_files() -> List[str]:
+    resource_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'resources')
+    return list(glob.glob(os.path.join(resource_path, '*.mp3')))
+
+
+@pytest.fixture()
+def audio_docs(mp3_files: List[str]) -> DocumentArray:
     return DocumentArray(
         [
             Document(
-                uri="https://p.scdn.co/mp3-preview/"
-                "4d26180e6961fd46866cd9106936ea55dfcbaa75?cid=774b29d4f13844c495f206cafdad9c86"
-            ),
-            Document(
-                uri="https://p.scdn.co/mp3-preview/"
-                "d012e536916c927bd6c8ced0dae75ee3b7715983?cid=774b29d4f13844c495f206cafdad9c86"
-            ),
-            Document(
-                uri="https://p.scdn.co/mp3-preview/"
-                "a1c11bb1cb231031eb20e5951a8bfb30503224e9?cid=774b29d4f13844c495f206cafdad9c86"
-            ),
+                blob=open(p, 'rb').read()
+            ) for p in mp3_files
         ]
     )
 
@@ -41,9 +42,9 @@ def text_docs() -> DocumentArray:
 def test_encode_audio(audio_docs: DocumentArray):
     encoder = OpenL3MusicText(hop_size_in_sec=20, trim_to_seconds=30)
 
-    encoder.encode(audio_docs, {})
+    audio_docs = encoder.encode(audio_docs, {})
 
-    for doc in audio_docs['@c']:
+    for doc in audio_docs:
         assert doc.embedding is not None
         assert doc.embedding.size == 512
 
@@ -58,9 +59,3 @@ def test_encode_text(text_docs: DocumentArray):
         assert doc.embedding.size == 512
 
 
-def test_fails_if_both_text_and_audio_are_set():
-    docs = DocumentArray([Document(text='hip hop', uri='https://someuri.com')])
-    encoder = OpenL3MusicText()
-
-    with pytest.raises(ValueError):
-        encoder.encode(docs, {})

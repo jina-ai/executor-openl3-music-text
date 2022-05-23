@@ -1,4 +1,4 @@
-jtype: OpenL3MusicText
+jtype: BiModalMusicTextEncoder
 metas:
   py_modules:
     - executor.py
