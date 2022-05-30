@@ -2,6 +2,7 @@ import glob
 import os
 from typing import List
 
+import numpy as np
 import pytest as pytest
 from docarray import DocumentArray, Document
 
@@ -39,8 +40,22 @@ def text_docs() -> DocumentArray:
     )
 
 
+@pytest.fixture()
+def embedded_docs() -> DocumentArray:
+    return DocumentArray(
+        [
+            Document(
+                embedding=np.ones(512)
+            ),
+            Document(
+                embeddings=np.ones(512)
+            ),
+        ]
+    )
+
+
 def test_encode_audio(audio_docs: DocumentArray):
-    encoder = OpenL3MusicText(hop_size_in_sec=20, trim_to_seconds=30)
+    encoder = BiModalMusicTextEncoder(hop_size_in_sec=20, trim_to_seconds=30)
 
     audio_docs = encoder.encode(audio_docs, {})
 
@@ -50,12 +65,20 @@ def test_encode_audio(audio_docs: DocumentArray):
 
 
 def test_encode_text(text_docs: DocumentArray):
-    encoder = OpenL3MusicText()
+    encoder = BiModalMusicTextEncoder()
 
-    encoder.encode(text_docs, {})
+    text_docs = encoder.encode(text_docs, {})
 
     for doc in text_docs:
         assert doc.embedding is not None
         assert doc.embedding.size == 512
 
 
+def test_passes_already_encoded(embedded_docs: DocumentArray):
+    encoder = BiModalMusicTextEncoder()
+
+    embedded_docs = encoder.encode(embedded_docs, {})
+
+    for doc in embedded_docs:
+        assert doc.embedding is not None
+        assert doc.embedding.size == 512

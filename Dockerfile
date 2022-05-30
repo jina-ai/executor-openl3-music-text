@@ -5,7 +5,7 @@ COPY . /executor_root/
 
 WORKDIR /executor_root
 
-RUN  apt update && apt upgrade -y && apt install -y libsndfile1 git
+RUN  apt update && apt upgrade -y && apt install -y libsndfile1 git ffmpeg
 
 RUN pip install -r requirements.txt
 

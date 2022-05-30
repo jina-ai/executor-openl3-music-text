@@ -49,7 +49,7 @@ class BiModalMusicTextEncoder(Executor):
         self,
         traversal_paths: str = "@r",
         effective_sample_rate: int = 44100,
-        hop_size_in_sec: int = 1,
+        hop_size_in_sec: int = 5,
         batch_size: int = 32,
         pretrained_model_name_or_path: str = "openai/clip-vit-base-patch32",
         base_tokenizer_model: Optional[str] = None,
@@ -102,45 +102,69 @@ class BiModalMusicTextEncoder(Executor):
 
     @requests
     def encode(self, docs: DocumentArray, parameters: Dict, **kwargs):
-        audio_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.blob) and doc_.embedding is None, docs)))
-        text_docs = DocumentArray(list(filter(lambda doc_: bool(doc_.text) and doc_.embedding is None, docs)))
+        need_to_compute_audio_doc_ids = [
+            doc.id for doc in list(filter(lambda doc_: bool(doc_.blob) and doc_.embedding is None, docs))
+        ]
+        already_embedded = [
+            doc.id for doc in list(filter(lambda doc_: doc_.embedding is not None, docs))
+
+        ]
+        need_to_compute_text_doc_ids = [
+            doc.id for doc in list(filter(lambda doc_: bool(doc_.text) and doc_.embedding is None, docs))
+        ]
 
         self.log.info(
             f"Received batch of size={len(docs)} "
-            f"containing {len(audio_docs)} docs with an audio blobs "
-            f"and {len(text_docs)} with a text attribute"
+            f"containing {len(need_to_compute_audio_doc_ids)} docs with an audio blobs "
+            f"and {len(need_to_compute_text_doc_ids)} with a text attribute"
         )
 
-        audio_results = DocumentArray()
-        for docs_batch in DocumentArray(
-            audio_docs[parameters.get("traversal_paths", self.traversal_paths)],
-        ).batch(batch_size=parameters.get("batch_size", self.batch_size)):
-            docs_batch.apply(_load_audio)
-            embeddings_list, ts_list = self._compute_audio_embeddings(docs_batch)
-            embeddings_list, ts_list = _remove_first_and_last(embeddings_list, ts_list)
+        audio_results = []
+        if len(need_to_compute_audio_doc_ids) > 0:
+            for docs_batch in DocumentArray(
+                docs[need_to_compute_audio_doc_ids][parameters.get("traversal_paths", self.traversal_paths)],
+            ).batch(batch_size=parameters.get("batch_size", self.batch_size)):
+                docs_batch.apply(_load_audio)
+                embeddings_list, ts_list = self._compute_audio_embeddings(docs_batch)
+                embeddings_list, ts_list = _remove_first_and_last(embeddings_list, ts_list)
 
-            for doc, embeddings_this_doc, ts_this_doc in zip(
-                docs_batch, embeddings_list, ts_list
-            ):
-                for emb, ts in zip(embeddings_this_doc, ts_this_doc):
-                    document = Document()
-                    document.tags = doc.tags.copy()
-                    document.tags["location"] = int(ts)
-                    document.embedding = emb
-                    audio_results.append(document)
+                for doc, embeddings_this_doc, ts_this_doc in zip(
+                    docs_batch, embeddings_list, ts_list
+                ):
+                    for emb, ts in zip(embeddings_this_doc, ts_this_doc):
+                        document = Document()
+                        document.tags = doc.tags.copy()
+                        document.tags["location"] = int(ts)
+                        document.embedding = emb
+                        audio_results.append(document)
 
-        for docs_batch in DocumentArray(
-            text_docs[parameters.get("traversal_paths", self.traversal_paths)],
-        ).batch(batch_size=parameters.get("batch_size", self.batch_size)):
-            text_batch = docs_batch.texts
+        text_results = []
+        if len(need_to_compute_text_doc_ids) > 0:
+            for docs_batch in DocumentArray(
+                docs[need_to_compute_text_doc_ids][parameters.get("traversal_paths", self.traversal_paths)],
+            ).batch(batch_size=parameters.get("batch_size", self.batch_size)):
+                text_batch = docs_batch.texts
 
-            with torch.inference_mode():
-                input_tokens = self._generate_input_tokens(text_batch)
-                embeddings = self.text_model.get_text_features(**input_tokens).cpu().numpy()
-                for doc, embedding in zip(docs_batch, embeddings):
-                    doc.embedding = embedding
+                with torch.inference_mode():
+                    input_tokens = self._generate_input_tokens(text_batch)
+                    embeddings = self.text_model.get_text_features(**input_tokens).cpu().numpy()
+                    for doc, embedding in zip(docs_batch, embeddings):
+                        document = Document()
+                        document.tags = doc.tags.copy()
+                        document.embedding = embedding
+                        text_results.append(document)
 
-        return audio_results + text_docs
+        # text embeddings have been modified in place and can be added to the result directly
+        # for audio docs, we create multiple embeddings per doc and therefore need to replace them and
+        # add audio docs that had an embedding already
+        result = DocumentArray(
+            text_results +
+            audio_results
+        )
+        if len(already_embedded) > 0:
+            result.extend(docs[already_embedded])
+        self.log.info(f'Returning result (size={len(result)})')
+        return result
 
     def _load_audio(self, docs: DocumentArray):
         docs.apply(_load_audio)
@@ -184,4 +208,3 @@ class BiModalMusicTextEncoder(Executor):
         ]
 
         return embedding_list, ts_list
-
